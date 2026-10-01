@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neighborhood Simulation</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfe3f0; font-family: system-ui, sans-serif; }
+  canvas { display: block; }
+  #toolbar {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; padding: 8px; background: rgba(255,255,255,.92);
+    border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.25); flex-wrap: wrap; justify-content: center;
+    max-width: calc(100vw - 24px);
+  }
+  #toolbar .sep { width: 1px; background: #bbb; margin: 0 4px; }
+  button { font: inherit; font-size: 14px; padding: 7px 12px; border: 1px solid #888; border-radius: 6px; background: #fff; cursor: pointer; }
+  button:hover:not(:disabled) { background: #e8f1ff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #info {
+    position: fixed; left: 12px; bottom: 12px; min-width: 230px; padding: 10px 14px;
+    background: rgba(255,255,255,.92); border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+    font-size: 13px; line-height: 1.5;
+  }
+  #info h3 { margin: 0 0 4px; font-size: 14px; }
+  #msg { position: fixed; right: 12px; bottom: 12px; max-width: 300px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(40,40,40,.85); color: #fff; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #msg.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button id="btn-build">Build house</button>
+  <button id="btn-expand">Expand (+1 floor)</button>
+  <button id="btn-demolish">Demolish</button>
+  <span class="sep"></span>
+  <button id="btn-addlot">Add lot</button>
+  <button id="btn-removelot">Remove lot</button>
+  <span class="sep"></span>
+  <button id="btn-buildall">Build all</button>
+  <button id="btn-demolishall">Demolish all</button>
+</div>
+<div id="info"></div>
+<div id="msg"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ------------------------------------------------------------------ *
+ * Semantic model
+ *   Neighborhood 1—* Lot ; Lot 1—(0..1) House
+ *   Lot:   { id, area (m²), boundary (polyline of {x,z}), house }
+ *   House: { floors }
+ * ------------------------------------------------------------------ */
+const MIN_LOTS = 10, MAX_LOTS = 16, MAX_FLOORS = 4;
+const STREET_HALF = 6;          // half width of the street (m)
+const LOT_DEPTH = 42;
+
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+function polygonArea(pts) {      // shoelace formula
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    a += p.x * q.z - q.x * p.z;
+  }
+  return Math.abs(a) / 2;
+}
+
+const neighborhood = { lots: [], nextId: 1, edge: [0, 0] };  // edge: x extent per side
+
+function createLot(side) {       // side 0 = north of street, 1 = south
+  const w = 24 + rand() * 10;
+  const x0 = neighborhood.edge[side], x1 = x0 + w;
+  const sgn = side === 0 ? -1 : 1;
+  const zf = sgn * STREET_HALF, zb = sgn * (STREET_HALF + LOT_DEPTH + (rand() - .5) * 6);
+  const j = () => (rand() - .5) * 3;
+  const boundary = [
+    { x: x0, z: zf }, { x: x1, z: zf },
+    { x: x1 + j(), z: zb }, { x: x0 + j(), z: zb },
+  ];
+  neighborhood.edge[side] = x1;
+  const lot = { id: neighborhood.nextId++, side, boundary, area: polygonArea(boundary), house: null };
+  neighborhood.lots.push(lot);
+  return lot;
+}
+
+// Actions (all enforce the rules)
+function buildHouse(lot) {
+  if (lot.house) return fail(`Lot ${lot.id} already has a house (max one per lot).`);
+  lot.house = { floors: 1 };
+  return ok(`Built a house on lot ${lot.id}.`);
+}
+function demolishHouse(lot) {
+  if (!lot.house) return fail(`Lot ${lot.id} has no house to demolish.`);
+  lot.house = null;
+  return ok(`Demolished the house on lot ${lot.id}.`);
+}
+function expandHouse(lot) {
+  if (!lot.house) return fail(`A house must exist on the lot before it can be expanded.`);
+  if (lot.house.floors >= MAX_FLOORS) return fail(`House already has the maximum ${MAX_FLOORS} floors.`);
+  lot.house.floors++;
+  return ok(`Expanded house on lot ${lot.id} to ${lot.house.floors} floors.`);
+}
+function addLot() {
+  if (neighborhood.lots.length >= MAX_LOTS) return fail(`Neighborhood is full (${MAX_LOTS} lots).`);
+  const side = neighborhood.edge[0] <= neighborhood.edge[1] ? 0 : 1;
+  createLot(side);
+  return ok('Added a new lot.');
+}
+function removeLot(lot) {
+  if (neighborhood.lots.length <= MIN_LOTS) return fail(`A neighborhood must keep at least ${MIN_LOTS} lots.`);
+  // Only the last lot on a side can go, so the street frontage stays contiguous.
+  const sameSide = neighborhood.lots.filter(l => l.side === lot.side);
+  if (sameSide[sameSide.length - 1] !== lot) return fail('Only the outermost lot on a street side can be removed.');
+  neighborhood.lots.splice(neighborhood.lots.indexOf(lot), 1);   // its house goes with it
+  neighborhood.edge[lot.side] = lot.boundary[0].x;
+  return ok(`Removed lot ${lot.id}.`);
+}
+const ok = m => ({ ok: true, m }), fail = m => ({ ok: false, m });
+
+// Initial demo: 12 lots, a few houses
+for (let i = 0; i < 6; i++) { createLot(0); createLot(1); }
+[[0, 1], [1, 2], [3, 1], [4, 3], [6, 2], [8, 1], [9, 2]].forEach(([i, f]) => {
+  const l = neighborhood.lots[i]; buildHouse(l); l.house.floors = f;
+});
+
+/* ------------------------------------------------------------------ *
+ * Rendering
+ * ------------------------------------------------------------------ */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe3f0);
+scene.fog = new THREE.Fog(0xcfe3f0, 250, 600);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 1500);
+camera.position.set(60, 110, 130);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.maxPolarAngle = Math.PI / 2 - 0.03;
+controls.target.set(80, 0, 0);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x6a8a5a, 0.8));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(100, 160, 60);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -150, right: 150, top: 120, bottom: -120, near: 10, far: 500 });
+sun.target.position.set(80, 0, 0);
+scene.add(sun, sun.target);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), new THREE.MeshLambertMaterial({ color: 0x6f9a5c }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05; ground.receiveShadow = true;
+scene.add(ground);
+
+const street = new THREE.Mesh(new THREE.PlaneGeometry(1, STREET_HALF * 2), new THREE.MeshLambertMaterial({ color: 0x45484d }));
+street.rotation.x = -Math.PI / 2; street.position.y = 0.02; street.receiveShadow = true;
+scene.add(street);
+const centerLine = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.3), new THREE.MeshBasicMaterial({ color: 0xe8c840 }));
+centerLine.rotation.x = -Math.PI / 2; centerLine.position.y = 0.04;
+scene.add(centerLine);
+
+const lotGroup = new THREE.Group(); scene.add(lotGroup);
+const matLot = new THREE.MeshLambertMaterial({ color: 0xb7dc96 });
+const matSel = new THREE.MeshLambertMaterial({ color: 0xf2e27a });
+const wallColors = [0xe9dcc3, 0xd9a89a, 0xa9c0d6, 0xc9d6a5, 0xe5c7a0, 0xcfcfd6];
+const matRoof = new THREE.MeshLambertMaterial({ color: 0x7a3b2e });
+const matWin = new THREE.MeshLambertMaterial({ color: 0x35506b });
+const FLOOR_H = 3;
+
+let selected = null;
+const pickables = [];
+
+function lotCentroid(lot) {
+  const n = lot.boundary.length;
+  return { x: lot.boundary.reduce((s, p) => s + p.x, 0) / n, z: lot.boundary.reduce((s, p) => s + p.z, 0) / n };
+}
+
+function buildHouseMesh(lot) {
+  const g = new THREE.Group();
+  const f = lot.house.floors;
+  const wallMat = new THREE.MeshLambertMaterial({ color: wallColors[lot.id % wallColors.length] });
+  const w = Math.min(14, lot.boundary[1].x - lot.boundary[0].x - 8), d = 11, h = f * FLOOR_H;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+  body.position.y = h / 2; body.castShadow = body.receiveShadow = true;
+  g.add(body);
+  // gable roof (triangular prism along x)
+  const rs = new THREE.Shape([new THREE.Vector2(-d / 2 - .5, 0), new THREE.Vector2(d / 2 + .5, 0), new THREE.Vector2(0, 3.2)]);
+  const roof = new THREE.Mesh(new THREE.ExtrudeGeometry(rs, { depth: w + 1, bevelEnabled: false }), matRoof);
+  roof.rotation.y = Math.PI / 2; roof.position.set(-(w + 1) / 2, h, 0); roof.castShadow = true;
+  g.add(roof);
+  // windows on the street-facing facade, one row per floor
+  const sgn = lot.side === 0 ? 1 : -1;      // facade normal points toward the street
+  for (let fl = 0; fl < f; fl++) for (const wx of [-w / 4, w / 4]) {
+    const win = new THREE.Mesh(new THREE.BoxGeometry(2, 1.4, .1), matWin);
+    win.position.set(wx, fl * FLOOR_H + 1.8, sgn * (d / 2 + .06));
+    g.add(win);
+  }
+  const door = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, .1), new THREE.MeshLambertMaterial({ color: 0x5a3a22 }));
+  door.position.set(0, 1.1, sgn * (d / 2 + .06)); g.add(door);
+  const c = lotCentroid(lot);
+  g.position.set(c.x, 0, c.z);
+  g.position.z = lot.side === 0 ? c.z + 2 : c.z - 2;
+  return g;
+}
+
+function rebuildScene() {
+  lotGroup.clear(); pickables.length = 0;
+  for (const lot of neighborhood.lots) {
+    const shape = new THREE.Shape(lot.boundary.map(p => new THREE.Vector2(p.x, p.z)));
+    const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), lot === selected ? matSel : matLot);
+    mesh.rotation.x = Math.PI / 2;          // shape (x, y) -> world (x, z)
+    mesh.position.y = 0.05; mesh.receiveShadow = true;
+    mesh.userData.lot = lot;
+    lotGroup.add(mesh); pickables.push(mesh);
+    const pts = [...lot.boundary, lot.boundary[0]].map(p => new THREE.Vector3(p.x, 0.12, p.z));
+    lotGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: lot === selected ? 0xd08000 : 0x4d6b3c })));
+    if (lot.house) lotGroup.add(buildHouseMesh(lot));
+  }
+  const xmax = Math.max(...neighborhood.edge, 1);
+  street.scale.x = xmax + 20; street.position.x = xmax / 2;
+  centerLine.scale.x = xmax + 20; centerLine.position.x = xmax / 2;
+  updateUI();
+}
+
+/* ------------------------------------------------------------------ *
+ * UI
+ * ------------------------------------------------------------------ */
+const $ = id => document.getElementById(id);
+let msgTimer;
+function toast(r) {
+  const el = $('msg'); el.textContent = r.m; el.style.background = r.ok ? 'rgba(40,40,40,.85)' : 'rgba(160,40,40,.9)';
+  el.classList.add('show'); clearTimeout(msgTimer); msgTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+function updateUI() {
+  const n = neighborhood.lots.length, houses = neighborhood.lots.filter(l => l.house).length;
+  const floors = neighborhood.lots.reduce((s, l) => s + (l.house ? l.house.floors : 0), 0);
+  let html = `<h3>Neighborhood</h3>${n} lots (min ${MIN_LOTS}) · ${houses} houses · ${floors} floors total<hr style="border:0;border-top:1px solid #ddd">`;
+  if (selected) {
+    html += `<h3>Lot ${selected.id}</h3>Area: ${selected.area.toFixed(0)} m²<br>Boundary: ${selected.boundary.length} vertices<br>` +
+      (selected.house ? `House: ${selected.house.floors} floor${selected.house.floors > 1 ? 's' : ''}` : 'House: none (vacant)');
+  } else html += '<i>Click a lot to select it.</i>';
+  $('info').innerHTML = html;
+  const s = selected;
+  $('btn-build').disabled = !s || !!s.house;
+  $('btn-expand').disabled = !s || !s.house || s.house.floors >= MAX_FLOORS;
+  $('btn-demolish').disabled = !s || !s.house;
+  $('btn-addlot').disabled = n >= MAX_LOTS;
+  $('btn-removelot').disabled = !s || n <= MIN_LOTS;
+  $('btn-buildall').disabled = houses === n;
+  $('btn-demolishall').disabled = houses === 0;
+}
+const act = fn => () => { const r = fn(); if (r) toast(r); rebuildScene(); };
+$('btn-build').onclick = act(() => selected && buildHouse(selected));
+$('btn-expand').onclick = act(() => selected && expandHouse(selected));
+$('btn-demolish').onclick = act(() => selected && demolishHouse(selected));
+$('btn-addlot').onclick = act(addLot);
+$('btn-removelot').onclick = act(() => {
+  if (!selected) return;
+  const r = removeLot(selected); if (r.ok) selected = null; return r;
+});
+$('btn-buildall').onclick = act(() => { neighborhood.lots.forEach(l => { if (!l.house) buildHouse(l); }); return ok('Built houses on all vacant lots.'); });
+$('btn-demolishall').onclick = act(() => { neighborhood.lots.forEach(l => demolishHouse(l)); return ok('Demolished all houses.'); });
+
+// picking (ignore drags used for orbiting)
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+let down = null;
+renderer.domElement.addEventListener('pointerdown', e => down = { x: e.clientX, y: e.clientY });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+  mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(pickables, false)[0];
+  selected = hit ? hit.object.userData.lot : null;
+  rebuildScene();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+rebuildScene();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
