@@ -175,7 +175,7 @@ scene.add(centerLine);
 
 const lotGroup = new THREE.Group(); scene.add(lotGroup);
 const matLot = new THREE.MeshLambertMaterial({ color: 0xb7dc96 });
-const matSel = new THREE.MeshLambertMaterial({ color: 0xf2e27a });
+const matSel = new THREE.MeshLambertMaterial({ color: 0xffe033 });
 const wallColors = [0xe9dcc3, 0xd9a89a, 0xa9c0d6, 0xc9d6a5, 0xe5c7a0, 0xcfcfd6];
 const matRoof = new THREE.MeshLambertMaterial({ color: 0x7a3b2e });
 const matWin = new THREE.MeshLambertMaterial({ color: 0x35506b });
@@ -192,7 +192,7 @@ function lotCentroid(lot) {
 function buildHouseMesh(lot) {
   const g = new THREE.Group();
   const f = lot.house.floors;
-  const wallMat = new THREE.MeshLambertMaterial({ color: wallColors[lot.id % wallColors.length] });
+  const wallMat = new THREE.MeshLambertMaterial({ color: lot === selected ? 0xffe033 : wallColors[lot.id % wallColors.length] });
   const w = Math.min(14, lot.boundary[1].x - lot.boundary[0].x - 8), d = 11, h = f * FLOOR_H;
   const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
   body.position.y = h / 2; body.castShadow = body.receiveShadow = true;
@@ -220,16 +220,20 @@ function buildHouseMesh(lot) {
 function rebuildScene() {
   lotGroup.clear(); pickables.length = 0;
   for (const lot of neighborhood.lots) {
-    const shape = new THREE.Shape(lot.boundary.map(p => new THREE.Vector2(p.x, p.z)));
+    const shape = new THREE.Shape(lot.boundary.map(p => new THREE.Vector2(p.x, -p.z)));
     const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), lot === selected ? matSel : matLot);
-    mesh.rotation.x = Math.PI / 2;          // shape (x, y) -> world (x, z)
+    mesh.rotation.x = -Math.PI / 2;         // shape (x, -z) -> world (x, z), normal facing up
     mesh.position.y = 0.05; mesh.receiveShadow = true;
     mesh.userData.lot = lot;
     lotGroup.add(mesh); pickables.push(mesh);
     const pts = [...lot.boundary, lot.boundary[0]].map(p => new THREE.Vector3(p.x, 0.12, p.z));
     lotGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
       new THREE.LineBasicMaterial({ color: lot === selected ? 0xd08000 : 0x4d6b3c })));
-    if (lot.house) lotGroup.add(buildHouseMesh(lot));
+    if (lot.house) {
+      const hm = buildHouseMesh(lot);
+      hm.traverse(o => { if (o.isMesh) { o.userData.lot = lot; pickables.push(o); } });   // clicking a house selects its lot
+      lotGroup.add(hm);
+    }
   }
   const xmax = Math.max(...neighborhood.edge, 1);
   street.scale.x = xmax + 20; street.position.x = xmax / 2;
