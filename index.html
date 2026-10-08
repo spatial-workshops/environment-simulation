@@ -77,12 +77,24 @@
   .rules li::before { content: "✓ "; color: var(--good); font-weight: 700; }
   .rules li.bad::before { content: "✕ "; color: var(--bad); }
 
-  #view { position: fixed; left: 12px; bottom: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; width: 250px; }
+  #view { position: fixed; left: 12px; bottom: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; width: 276px; }
+  #view label.tg { justify-content: flex-start; align-items: center; gap: 7px; color: var(--fg); cursor: pointer; }
+  #view label.tg i { width: 14px; height: 3px; border-radius: 2px; background: var(--c); display: inline-block; }
+  .toggles { display: flex; flex-direction: column; gap: 4px; }
+  .geo { display: flex; gap: 10px; align-items: center; }
+  .geo svg { width: 58px; height: 58px; flex: none; }
+  .geo div { font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+  .geo div b { color: var(--fg); font-weight: 500; }
+  .card.parcel { border-color: rgba(255,138,31,.6); }
+  .card.parcel h3 { color: #ff9a3c; }
+  .card.geo-card h3 { color: #ff7480; }
+  .legal { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+  .legal i { color: #6f7c8e; }
   #view label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
   #view input[type=range] { width: 100%; accent-color: var(--accent); }
   #view .row { display: flex; gap: 6px; }
   #view .row .btn { flex: 1; justify-content: center; }
-  .legend { display: flex; gap: 10px; white-space: nowrap; color: var(--muted); font-size: 11px; }
+  .legend { display: flex; gap: 10px; white-space: nowrap; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
   .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
 
   #tag { position: fixed; pointer-events: none; transform: translate(-50%, -100%); padding: 3px 9px; border-radius: 99px;
@@ -96,7 +108,8 @@
 
   @media (max-width: 900px) {
     #inspector { top: auto; left: 12px; width: auto; height: 38vh; }
-    #view { bottom: calc(38vh + 24px); width: 220px; }
+    #view { bottom: calc(38vh + 24px); width: 240px; }
+    .geo { display: none; }
     #brand { display: none; }
     #toolbar { top: 8px; left: 12px; max-width: calc(100vw - 24px); }
     .btn kbd { display: none; }
@@ -136,6 +149,17 @@
     <button class="btn" id="b-reset">Reset view</button>
     <button class="btn" id="b-top">Top view</button>
   </div>
+  <div class="toggles">
+    <label class="tg"><input type="checkbox" id="t-grid" checked><i style="--c:#b3202e"></i> Lat / Lon grid <small style="color:var(--muted)">(true north)</small></label>
+    <label class="tg"><input type="checkbox" id="t-parcel" checked><i style="--c:#ff8a1f"></i> Address &amp; lot records</label>
+  </div>
+  <div class="geo">
+    <svg id="compass" viewBox="-30 -30 60 60"><circle r="28" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.25)"/>
+      <g id="cmp-hood"><path d="M0,-25 L3,0 L-3,0Z" fill="#ff8a1f"/></g>
+      <g id="cmp-true"><path d="M0,-27 L4.5,0 L-4.5,0Z" fill="#d6303e"/><path d="M0,27 L4.5,0 L-4.5,0Z" fill="rgba(255,255,255,.35)"/><text y="-14" font-size="9" font-weight="700" fill="#fff" text-anchor="middle">N</text></g>
+    </svg>
+    <div>True N <b style="color:#ff6a78">red</b> · block N <b style="color:#ff9a3c">orange</b> (20° E)<br>Cursor <b id="cursor">—</b></div>
+  </div>
   <div class="legend"><span style="--c:#ffd21f">Selected</span><span style="--c:#fff3a8">Parent lot</span><span style="--c:#b9ab7e">Unparcelled</span></div>
 </div>
 
@@ -152,6 +176,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 /* =====================================================================
  * 1. SEMANTIC MODEL
@@ -166,7 +193,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
  *   - a lot has zero or one house
  *   - a neighborhood has at least MIN_LOTS lots
  * ===================================================================== */
-const MIN_LOTS = 10, MAX_FLOORS = 4, FLOOR_H = 3.1;
+const MIN_LOTS = 10, MAX_FLOORS = 4, FLOOR_H = 3.1, SIM_YEAR = 2026;
 
 // street grid
 const ST = 12, SW = 3;                 // street width, sidewalk width (m)
@@ -262,7 +289,7 @@ const ok = m => ({ ok: true, m }), fail = m => ({ ok: false, m });
 function buildHouse(lot) {
   if (!lot.active) return fail(`${lot.block} plot ${lot.id} is unparcelled land — a house must exist on a lot.`);
   if (lot.house) return fail(`${lot.address} already has a house (a lot holds at most one).`);
-  lot.house = { floors: 1 }; visuals.house(lot, 'build');
+  lot.house = { floors: 1, yearBuilt: SIM_YEAR }; visuals.house(lot, 'build');
   return ok(`Built a house at ${lot.address}.`);
 }
 function demolishHouse(lot) {
@@ -308,9 +335,36 @@ function houseMetrics(lot) {
     residents: Math.max(1, Math.round(gfa / 50 + 1)), far: gfa / lot.area, coverage: (main + garage) / lot.area };
 }
 
+/* ---- synthetic city / county records (parcel + address databases) ---- */
+const CITY = 'Maple Hollow', STATE = 'OH', COUNTY = 'Linden County', SUBDIVISION = 'Maple Hollow Estates';
+const SURNAMES = ['Okafor', 'Lindqvist', 'Ramirez', 'Chen', 'Haddad', 'Whitaker', 'Novak', 'Duarte', 'Sato', 'Brennan', 'Petrov', 'Alvarez', 'Kowalski', 'Mbeki', 'Fitzgerald', 'Larsen', 'Nguyen', 'Abbott', 'Rossi', 'Bergström'];
+{
+  const blocks = [...new Set(plots.map(p => p.block))];
+  for (const lot of plots) {
+    const r = mulberry32(777 + lot.id * 104729), pick = a => a[Math.floor(r() * a.length)], ini = () => String.fromCharCode(65 + Math.floor(r() * 26));
+    const section = blocks.indexOf(lot.block) + 1, kind = r(), sn = pick(SURNAMES);
+    lot.section = section;
+    lot.record = {
+      apn: `${100 + section * 7}-${String(3100 + lot.id * 41).padStart(4, '0')}-${String(lot.id).padStart(3, '0')}`,
+      platBook: 60 + Math.floor(section / 4), platPage: 10 + section * 2,
+      zip: lot.bx < 2 ? '43099' : '43098', ward: `Ward ${1 + (lot.bx >> 1) + (lot.bz > 0 ? 1 : 0)}`, tract: `${4012 + lot.bz}.0${1 + (lot.bx >> 1)}`,
+      owner: kind < 0.6 ? `${sn.toUpperCase()}, ${ini()} & ${ini()}` : kind < 0.85 ? `${sn} Family Trust` : `${pick(SURNAMES)} Holdings LLC`,
+      landRate: 95 + r() * 55, saleYear: 1996 + Math.floor(r() * 29), saleFactor: 0.55 + r() * 0.35,
+    };
+  }
+}
+const fullAddress = lot => `${lot.address}, ${CITY}, ${STATE} ${lot.record.zip}`;
+const legalDescription = lot => `Lot ${lot.id} of ${SUBDIVISION}, Section ${lot.section}, as recorded in Plat Book ${lot.record.platBook}, Page ${lot.record.platPage}, Recorder's Office, ${COUNTY}, ${STATE}.`;
+function assessment(lot) {
+  const land = Math.round(lot.area * lot.record.landRate / 100) * 100;
+  const imp = lot.house ? Math.round((houseMetrics(lot).gfa * 1650 + houseMetrics(lot).garage * 600) / 100) * 100 : 0;
+  return { land, imp, total: land + imp, tax: Math.round((land + imp) * 0.0165) };
+}
+const lastSale = lot => ({ year: lot.record.saleYear, price: Math.round(assessment(lot).total * lot.record.saleFactor / 500) * 500 });
+
 // seed the demo: roughly three quarters of lots start built
 for (const lot of plots) {
-  if (rng() < 0.74) { const r = rng(); lot.house = { floors: r < .38 ? 1 : r < .82 ? 2 : r < .96 ? 3 : 4 }; }
+  if (rng() < 0.74) { const r = rng(); lot.house = { floors: r < .38 ? 1 : r < .82 ? 2 : r < .96 ? 3 : 4, yearBuilt: 1960 + lot.bx * 12 + Math.floor(rng() * 16) }; }
 }
 
 /* =====================================================================
@@ -330,6 +384,23 @@ const maxAniso = renderer.capabilities.getMaxAnisotropy();
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xcfe7f7, 650, 1700);
 
+/* The neighborhood lives in `hood`, rotated so its street grid is AZIMUTH_DEG east of true north.
+ * World axes are true north = -z, true east = +x; the lat/lon graticule is aligned to those. */
+const AZIMUTH_DEG = 20;
+const hood = new THREE.Group(); hood.rotation.y = -AZIMUTH_DEG * Math.PI / 180; scene.add(hood); hood.updateMatrixWorld(true);
+const ORIGIN = { lat: 39.9612, lon: -82.9988 };                 // fictional site, world (0,0)
+const M_LAT = 111320, M_LON = 111320 * Math.cos(ORIGIN.lat * Math.PI / 180);
+const worldToGeo = (x, z) => ({ lat: ORIGIN.lat - z / M_LAT, lon: ORIGIN.lon + x / M_LON });
+const geoToWorld = (lat, lon) => ({ x: (lon - ORIGIN.lon) * M_LON, z: -(lat - ORIGIN.lat) * M_LAT });
+const hoodToWorld = (x, z, y = 0) => hood.localToWorld(new THREE.Vector3(x, y, z));
+const hoodToGeo = (x, z) => { const w = hoodToWorld(x, z); return worldToGeo(w.x, w.z); };
+const fmtLat = (v, d = 6) => `${Math.abs(v).toFixed(d)}° ${v >= 0 ? 'N' : 'S'}`, fmtLon = (v, d = 6) => `${Math.abs(v).toFixed(d)}° ${v >= 0 ? 'E' : 'W'}`;
+function facingAzimuth(lot) {                                   // compass bearing the house front faces
+  const a = hoodToWorld(0, 0), b = hoodToWorld(0, -lot.inward);
+  return (Math.atan2(b.x - a.x, -(b.z - a.z)) * 180 / Math.PI + 360) % 360;
+}
+const compassName = az => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(az / 45) % 8];
+
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 3, 2200);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08;
@@ -342,7 +413,7 @@ camera.position.copy(HOME.pos); controls.target.copy(HOME.target); controls.upda
 const hemi = new THREE.HemisphereLight(0xcfe6ff, 0x6d8a55, 0.8); scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 3); sun.castShadow = true;
 sun.shadow.mapSize.set(4096, 4096);
-Object.assign(sun.shadow.camera, { left: -330, right: 330, top: 200, bottom: -200, near: 50, far: 1200 });
+Object.assign(sun.shadow.camera, { left: -340, right: 340, top: 250, bottom: -250, near: 50, far: 1200 });
 sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.6;
 scene.add(sun, sun.target);
 const moon = new THREE.DirectionalLight(0x6f88c8, 0); moon.position.set(-200, 300, -120); scene.add(moon);
@@ -396,7 +467,7 @@ const lineSolid = new THREE.LineBasicMaterial({ color: 0x4f7c3b, transparent: tr
 const lineDash = new THREE.LineDashedMaterial({ color: 0x7c7350, dashSize: 2, gapSize: 1.5 });
 
 /* ---- ground, streets, blocks ---- */
-const staticGroup = new THREE.Group(); scene.add(staticGroup);
+const staticGroup = new THREE.Group(); hood.add(staticGroup);
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), matGround);
 ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; staticGroup.add(ground);
 
@@ -575,7 +646,7 @@ const disposeGroup = g => g.traverse(o => { if (o.geometry) o.geometry.dispose()
  * 4. LOT MESHES, SELECTION VISUALS, ANIMATION
  * ===================================================================== */
 const lotsGroup = new THREE.Group(), housesGroup = new THREE.Group(), decoGroup = new THREE.Group(), ribbonGroup = new THREE.Group();
-scene.add(lotsGroup, housesGroup, decoGroup, ribbonGroup);
+hood.add(lotsGroup, housesGroup, decoGroup, ribbonGroup);
 
 for (const lot of plots) {
   const shape = new THREE.Shape(lot.boundary.map(p => new THREE.Vector2(p.x, -p.z)));
@@ -619,10 +690,86 @@ const visuals = {
     refreshVisual(lot);
   },
   lot(lot) {                               // parcel added/removed
-    setTreesVisible(lot, lot.active); refreshVisual(lot);
+    setTreesVisible(lot, lot.active); refreshVisual(lot); lot.label.visible = lot.active; rebuildParcelLines();
   },
 };
 for (const lot of plots) if (lot.house) visuals.house(lot, 'none');
+
+/* =====================================================================
+ * 4b. FRAMES OF REFERENCE (overlays)
+ *   1. lat/lon graticule (dark red) - aligned to TRUE north, so the tilted street grid cuts across it
+ *   2. parcel / address records (orange) - lot outlines + labels derived from the lot records
+ * ===================================================================== */
+const overlays = { grid: true, parcels: true };
+const PR = renderer.getPixelRatio();
+const lineMats = [];
+function makeLineMat(color, widthPx, opacity) {
+  const m = new LineMaterial({ color, linewidth: widthPx * PR, transparent: true, opacity, depthTest: false, depthWrite: false });
+  m.resolution.set(innerWidth * PR, innerHeight * PR); lineMats.push(m); return m;
+}
+function fatLines(positions, mat, order = 20) {
+  const g = new LineSegmentsGeometry(); g.setPositions(positions);
+  const l = new LineSegments2(g, mat); l.renderOrder = order; l.frustumCulled = false; return l;
+}
+function textSprite(text, { color = '#8c0c18', bg = 'rgba(255,255,255,.78)', size = 30, w = 256, h = 64, width = 30 } = {}) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d');
+  g.fillStyle = bg; g.beginPath(); g.roundRect(2, 2, w - 4, h - 4, 12); g.fill();
+  g.fillStyle = color; g.font = `700 ${size}px ui-monospace, Menlo, Consolas, monospace`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, w / 2, h / 2 + 2);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = maxAniso;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false, depthWrite: false, fog: false }));
+  sp.scale.set(width, width * h / w, 1); sp.renderOrder = 30; return sp;
+}
+
+// 1. graticule: a line every 0.0005 deg of latitude and longitude, heavier + labelled every 0.001 deg
+const graticule = new THREE.Group(); scene.add(graticule);
+{
+  const a = AZIMUTH_DEG * Math.PI / 180, hx = TOTAL_W / 2, hz = TOTAL_D / 2;
+  const ex = hx * Math.cos(a) + hz * Math.sin(a) + 40, ez = hx * Math.sin(a) + hz * Math.cos(a) + 40, y = 0.6, STEP = 0.0005;
+  const nw = worldToGeo(-ex, -ez), se = worldToGeo(ex, ez), minor = [], major = [];
+  for (let n = Math.ceil(se.lat / STEP); n <= Math.floor(nw.lat / STEP); n++) {
+    const lat = n * STEP, z = geoToWorld(lat, 0).z;
+    (n % 2 === 0 ? major : minor).push(-ex, y, z, ex, y, z);
+    if (n % 2 === 0) { const s = textSprite(fmtLat(lat, 4), { width: 64, size: 34 }); s.position.set(-ex - 34, 2, z); graticule.add(s); }
+  }
+  for (let n = Math.ceil(nw.lon / STEP); n <= Math.floor(se.lon / STEP); n++) {
+    const lon = n * STEP, x = geoToWorld(0, lon).x;
+    (n % 2 === 0 ? major : minor).push(x, y, -ez, x, y, ez);
+    if (n % 2 === 0) { const s = textSprite(fmtLon(lon, 4), { width: 64, size: 34 }); s.position.set(x, 2, ez + 14); graticule.add(s); }
+  }
+  graticule.add(fatLines(minor, makeLineMat(0x8c0c18, 1, 0.55), 18), fatLines(major, makeLineMat(0x7a0814, 2.2, 0.9), 19));
+  const tint = new THREE.Mesh(new THREE.PlaneGeometry(ex * 2, ez * 2), new THREE.MeshBasicMaterial({ color: 0x7a0a14, transparent: true, opacity: 0.07, depthTest: false, depthWrite: false, fog: false }));
+  tint.rotation.x = -Math.PI / 2; tint.position.y = 0.5; tint.renderOrder = 5; graticule.add(tint);
+}
+
+// 2. parcel overlay: orange lot outlines + address / lot-number labels, drawn from lot.record
+const parcelGroup = new THREE.Group(); hood.add(parcelGroup);
+const parcelMat = makeLineMat(0xff8a1f, 2.4, 0.95);
+let parcelLines = null;
+function rebuildParcelLines() {
+  if (parcelLines) { parcelGroup.remove(parcelLines); parcelLines.geometry.dispose(); }
+  const pos = [], y = GROUND_Y + 0.3;
+  for (const lot of plots) if (lot.active) for (let i = 0; i < 4; i++) { const p = lot.boundary[i], q = lot.boundary[(i + 1) % 4]; pos.push(p.x, y, p.z, q.x, y, q.z); }
+  parcelLines = fatLines(pos, parcelMat); parcelGroup.add(parcelLines);
+}
+function parcelLabel(lot) {
+  const W = 256, H = 128, c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  g.fillStyle = 'rgba(28,16,4,.78)'; g.beginPath(); g.roundRect(3, 3, W - 6, H - 6, 14); g.fill();
+  g.strokeStyle = '#ff8a1f'; g.lineWidth = 3; g.stroke();
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = '700 33px ui-monospace, Menlo, Consolas, monospace';
+  g.fillStyle = '#ffe2bd'; g.fillText(`${lot.number} ${lot.street.toUpperCase()}`, W / 2, 34);
+  g.font = '800 40px ui-monospace, Menlo, Consolas, monospace'; g.fillStyle = '#ff9a3c'; g.fillText(`LOT ${lot.id}`, W / 2, 74);
+  g.font = '600 20px ui-monospace, Menlo, Consolas, monospace'; g.fillStyle = '#d9a46c'; g.fillText(`APN ${lot.record.apn}`, W / 2, 107);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = maxAniso;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(17, 8.5), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthTest: false, depthWrite: false, fog: false }));
+  const p = lotPoint(lot, 0.5, 0.1); m.rotation.x = -Math.PI / 2; m.position.set(p.x, GROUND_Y + 0.4, p.z); m.renderOrder = 21; return m;
+}
+for (const lot of plots) { lot.label = parcelLabel(lot); parcelGroup.add(lot.label); }
+rebuildParcelLines();
+function applyOverlayState() {
+  graticule.visible = overlays.grid; parcelGroup.visible = overlays.parcels;
+  for (const lot of plots) lot.label.visible = lot.active;
+}
+applyOverlayState();
 
 function updateRibbon() {
   ribbonGroup.clear();
@@ -693,12 +840,37 @@ function lotDiagram(lot) {
 }
 
 const row = (a, b) => `<dt>${a}</dt><dd>${b}</dd>`;
+const usd = n => '$' + fmt(n);
+function parcelCard(lot) {
+  const rec = lot.record, c = lotPoint(lot, 0.5, 0.5), geo = hoodToGeo(c.x, c.z), az = facingAzimuth(lot);
+  const where = `<div class="card geo-card"><h3>Location (WGS84)</h3><dl>
+      ${row('Latitude', fmtLat(geo.lat))}${row('Longitude', fmtLon(geo.lon))}
+      ${row('Block heading', `${AZIMUTH_DEG}° E of true N`)}${row('Frontage faces', `${fmt(az)}° ${compassName(az)}`)}
+    </dl></div>`;
+  if (!lot.active) return `<div class="card parcel"><h3>Parcel record <span class="chip gray">retired</span></h3>
+    <span class="hint">Plot ${lot.id} is no longer a platted lot. Its record (APN ${rec.apn}) is retired; adding the lot restores it.</span></div>${where}`;
+  const a = assessment(lot), sale = lastSale(lot);
+  return `<div class="card parcel"><h3>Parcel record <span class="chip yellow" style="background:rgba(255,138,31,.2);color:#ff9a3c">${rec.apn}</span></h3><dl>
+      ${row('Situs address', fullAddress(lot))}
+      ${row('Lot number', `Lot ${lot.id} · Sec. ${lot.section}`)}
+      ${row('Subdivision', SUBDIVISION)}
+      ${row('Plat reference', `PB ${rec.platBook}, Pg ${rec.platPage}`)}
+      ${row('Zoning', 'R-1 Single-family')}
+      ${row('Land use', lot.house ? '110 · Single-family dwelling' : '100 · Vacant residential')}
+      ${row('Owner of record', rec.owner)}
+      ${row('Year built', lot.house ? lot.house.yearBuilt : '—')}
+      ${row('Last sale', `${usd(sale.price)} <small>(${sale.year})</small>`)}
+      ${row('Assessed land', usd(a.land))}${row('Assessed improvements', usd(a.imp))}
+      ${row('Assessed total', `<b>${usd(a.total)}</b>`)}${row('Est. annual tax', usd(a.tax))}
+      ${row('Jurisdiction', `${rec.ward} · Tract ${rec.tract}`)}
+    </dl><div class="legal"><i>Legal:</i> ${legalDescription(lot)}<br><i>Synthetic demonstration data.</i></div></div>${where}`;
+}
 function renderSelection() {
   const el = $('sel'), lot = sel.lot;
   if (!lot) {
     el.innerHTML = `<h2>Selection</h2><ul class="hint" style="margin:0;padding-left:18px">
       <li>Click a <b style="color:#ffd21f">lot</b> or a <b style="color:#ffd21f">house</b> to inspect it.</li>
-      <li>Double-click to zoom to it.</li><li>Drag to orbit, right-drag to pan, wheel to zoom.</li>
+      <li>Double-click to zoom to it. Toggle the <b style="color:#ff6a78">lat/lon grid</b> and <b style="color:#ff9a3c">parcel records</b> overlays at bottom-left.</li><li>Drag to orbit, right-drag to pan, wheel to zoom.</li>
       <li>Shortcuts: B build · E expand · D demolish · A add lot · R remove lot · Esc clear.</li></ul>`;
     return;
   }
@@ -708,6 +880,7 @@ function renderSelection() {
     <div class="title"><b>${lot.active ? 'Lot ' + lot.id : 'Plot ' + lot.id}</b><small>${lot.address}</small></div>
     <div class="chips">${status}${lot.corner ? '<span class="chip">Corner lot</span>' : ''}<span class="chip">${lot.block}</span></div>
     ${lotDiagram(lot)}
+    ${parcelCard(lot)}
     <div class="card ${sel.part === 'lot' ? 'hl' : ''}"><h3>Lot</h3><dl>
       ${row('Area', `${fmt(lot.area)} m² <small>(${sqft(lot.area)} ft²)</small>`)}
       ${row('Boundary', `polyline · ${lot.boundary.length} vertices`)}
@@ -800,7 +973,7 @@ function flyTo(target, pos, dur = 900) { camAnim = { t0: performance.now(), dur,
 $('b-reset').onclick = () => flyTo(HOME.target, HOME.pos);
 $('b-top').onclick = () => flyTo(TOP.target, TOP.pos);
 function focusLot(lot) {
-  const c = lotPoint(lot, 0.5, 0.5), t = new THREE.Vector3(c.x, 0, c.z);
+  const c = lotPoint(lot, 0.5, 0.5), t = hoodToWorld(c.x, c.z);
   const dir = camera.position.clone().sub(controls.target); dir.y = Math.max(dir.y, 0.5 * dir.length()); dir.setLength(95);
   flyTo(t, t.clone().add(dir));
 }
@@ -831,15 +1004,24 @@ addEventListener('keydown', e => {
   if (k === 'b') actions.build(); else if (k === 'e') actions.expand(); else if (k === 'd') actions.demolish();
   else if (k === 'a') actions.addlot(); else if (k === 'r') actions.removelot(); else if (e.key === 'Escape') setSelection(null);
 });
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), cursorHit = new THREE.Vector3();
+function updateCursor(x, y) {
+  let txt = '—';
+  if (x >= 0) { ndc.set(x / innerWidth * 2 - 1, -(y / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera);
+    if (ray.ray.intersectPlane(groundPlane, cursorHit)) { const g = worldToGeo(cursorHit.x, cursorHit.z); txt = `${fmtLat(g.lat, 5)} ${fmtLon(g.lon, 5)}`; } }
+  $('cursor').textContent = txt;
+}
+$('t-grid').onchange = e => { overlays.grid = e.target.checked; applyOverlayState(); };
+$('t-parcel').onchange = e => { overlays.parcels = e.target.checked; applyOverlayState(); };
 function applyHover() {
   if (!hoverReq) return;
-  const p = hoverReq.x < 0 ? null : pick(hoverReq.x, hoverReq.y); hoverReq = null;
+  const hr = hoverReq, p = hr.x < 0 ? null : pick(hr.x, hr.y); hoverReq = null; updateCursor(hr.x, hr.y);
   const prev = hover.lot; hover = p || { lot: null, part: null };
   if (prev) refreshVisual(prev); if (hover.lot) refreshVisual(hover.lot);
   cv.style.cursor = p ? 'pointer' : 'grab';
 }
 
-addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); lineMats.forEach(m => m.resolution.set(innerWidth * PR, innerHeight * PR)); });
 
 /* =====================================================================
  * 7. MAIN LOOP
@@ -848,7 +1030,7 @@ const tag = $('tag'), tmp = new THREE.Vector3();
 function updateTag() {
   const lot = sel.lot; if (!lot) { tag.style.display = 'none'; return; }
   const c = lotPoint(lot, 0.5, 0.5); const top = lot.house ? houseMetrics(lot).height + 3 : 3;
-  tmp.set(c.x, GROUND_Y + top, c.z).project(camera);
+  tmp.copy(hoodToWorld(c.x, c.z, GROUND_Y + top)).project(camera);
   if (tmp.z > 1) { tag.style.display = 'none'; return; }
   tag.style.display = 'block'; tag.style.left = (tmp.x * 0.5 + 0.5) * innerWidth + 'px'; tag.style.top = (-tmp.y * 0.5 + 0.5) * innerHeight + 'px';
   tag.textContent = `${lot.address}${lot.house ? ' · ' + lot.house.floors + 'F' : lot.active ? ' · vacant' : ' · unparcelled'}`;
@@ -867,6 +1049,8 @@ renderer.setAnimationLoop(now => {
   }
   if (growing && now - lastGrow > 450) { lastGrow = now; growStep(); }
   applyHover(); controls.update();
+  const azDeg = controls.getAzimuthalAngle() * 180 / Math.PI;
+  $('cmp-true').setAttribute('transform', `rotate(${azDeg.toFixed(1)})`); $('cmp-hood').setAttribute('transform', `rotate(${(azDeg + AZIMUTH_DEG).toFixed(1)})`);
   sky.position.copy(camera.position);
   updateTag();
   renderer.render(scene, camera);
@@ -876,7 +1060,7 @@ setTime(15.5); renderUI();
 
 // small handle for debugging / automated tests
 window.sim = { plots, activeLots, select: (lot, part = 'lot') => setSelection({ lot, part }), buildHouse, expandHouse, demolishHouse, removeLot, addLot, validate,
-  screenPos: (lot, part = 'lot') => { const c = lotPoint(lot, 0.5, part === 'house' ? 0.3 : 0.9); const v = new THREE.Vector3(c.x, part === 'house' ? GROUND_Y + 3 : GROUND_Y, c.z).project(camera);
+  screenPos: (lot, part = 'lot') => { const c = lotPoint(lot, 0.5, part === 'house' ? 0.3 : 0.9); const v = hoodToWorld(c.x, c.z, part === 'house' ? GROUND_Y + 3 : GROUND_Y).project(camera);
     return { x: (v.x * 0.5 + 0.5) * innerWidth, y: (-v.y * 0.5 + 0.5) * innerHeight }; } };
 </script>
 </body>
